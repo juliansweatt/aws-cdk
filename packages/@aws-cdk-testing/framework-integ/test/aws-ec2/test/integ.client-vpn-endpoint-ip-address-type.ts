@@ -1,46 +1,27 @@
-import type { StackProps } from 'aws-cdk-lib';
-import { App, RemovalPolicy, Stack, UnscopedValidationError } from 'aws-cdk-lib';
-import { lit } from 'aws-cdk-lib/core/lib/helpers-internal';
-import * as acm from 'aws-cdk-lib/aws-certificatemanager';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as path from 'path';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import * as route53 from 'aws-cdk-lib/aws-route53';
+import type { StackProps } from 'aws-cdk-lib';
+import { App, CustomResource, CustomResourceProvider, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Construct } from 'constructs';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import { EC2_RESTRICT_DEFAULT_SECURITY_GROUP } from 'aws-cdk-lib/cx-api';
 import { IntegTest } from '@aws-cdk/integ-tests-alpha';
-import type { Construct } from 'constructs';
-
-/**
- * In order to test this you need to have a valid public hosted zone that you can use
- * to validate the domain identity.
- */
-const hostedZoneId = process.env.CDK_INTEG_HOSTED_ZONE_ID ?? process.env.HOSTED_ZONE_ID;
-if (!hostedZoneId) throw new UnscopedValidationError(lit`HostedZoneIdRequired`, 'For this test you must provide your own HostedZoneId as an env var "HOSTED_ZONE_ID". See framework-integ/README.md for details.');
-const hostedZoneName = process.env.CDK_INTEG_HOSTED_ZONE_NAME ?? process.env.HOSTED_ZONE_NAME;
-if (!hostedZoneName) throw new UnscopedValidationError(lit`HostedZoneNameRequired`, 'For this test you must provide your own HostedZoneName as an env var "HOSTED_ZONE_NAME". See framework-integ/README.md for details.');
-
-interface TestStackProps extends StackProps {
-  hostedZoneId: string;
-  hostedZoneName: string;
-}
+import { STANDARD_CUSTOM_RESOURCE_PROVIDER_RUNTIME } from '../../config';
 
 class TestStack extends Stack {
-  constructor(scope: Construct, id: string, props: TestStackProps) {
+  constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
+    this.node.setContext(EC2_RESTRICT_DEFAULT_SECURITY_GROUP, false);
 
-    const hostedZone = route53.PublicHostedZone.fromHostedZoneAttributes(this, 'HostedZone', {
-      hostedZoneId: props.hostedZoneId,
-      zoneName: props.hostedZoneName,
-    });
+    // Import server and client certificates in ACM
+    const certificates = new ImportCertificates(this, 'ImportCertificates');
 
-    const serverCertificate = new acm.Certificate(this, 'Certificate', {
-      domainName: `server.${props.hostedZoneName}`,
-      validation: acm.CertificateValidation.fromDns(hostedZone),
+    const vpc = new ec2.Vpc(this, 'Vpc', {
+      maxAzs: 2,
+      natGateways: 0,
+      ipProtocol: ec2.IpProtocol.DUAL_STACK,
     });
-    const clientCertificate = new acm.Certificate(this, 'ClientCertificate', {
-      domainName: `client.${props.hostedZoneName}`,
-      validation: acm.CertificateValidation.fromDns(hostedZone),
-    });
-
-    const vpc = new ec2.Vpc(this, 'Vpc', { maxAzs: 2, natGateways: 0 });
+    vpc.node.addDependency(certificates); // ensure certificates are deleted last, when not in use anymore
 
     const logGroup = new logs.LogGroup(this, 'LogGroup', {
       removalPolicy: RemovalPolicy.DESTROY,
@@ -48,8 +29,8 @@ class TestStack extends Stack {
 
     vpc.addClientVpnEndpoint('Endpoint', {
       cidr: '10.100.0.0/16',
-      serverCertificateArn: serverCertificate.certificateArn,
-      clientCertificateArn: clientCertificate.certificateArn,
+      serverCertificateArn: certificates.serverCertificateArn,
+      clientCertificateArn: certificates.clientCertificateArn,
       logGroup,
       endpointIpAddressType: ec2.ClientVpnEndpointIpAddressType.DUAL_STACK,
       trafficIpAddressType: ec2.ClientVpnEndpointIpAddressType.DUAL_STACK,
@@ -57,12 +38,46 @@ class TestStack extends Stack {
   }
 }
 
+const IMPORT_CERTIFICATES_RESOURCE_TYPE = 'Custom::ACMImportCertificates';
+
+class ImportCertificates extends Construct {
+  public readonly serverCertificateArn: string;
+  public readonly clientCertificateArn: string;
+
+  constructor(scope: Construct, id: string) {
+    super(scope, id);
+
+    const serviceToken = CustomResourceProvider.getOrCreate(this, IMPORT_CERTIFICATES_RESOURCE_TYPE, {
+      codeDirectory: path.join(__dirname, 'import-certificates-handler'),
+      runtime: STANDARD_CUSTOM_RESOURCE_PROVIDER_RUNTIME,
+      policyStatements: [{
+        Effect: 'Allow',
+        Action: ['acm:ImportCertificate', 'acm:DeleteCertificate'],
+        Resource: '*',
+      }],
+    });
+
+    const createCertificates = new CustomResource(this, 'CreateCertificates', {
+      resourceType: IMPORT_CERTIFICATES_RESOURCE_TYPE,
+      serviceToken,
+    });
+    this.serverCertificateArn = createCertificates.getAttString('ClientCertificateArn');
+    this.clientCertificateArn = createCertificates.getAttString('ServerCertificateArn');
+
+    new CustomResource(this, 'DeleteCertificates', {
+      resourceType: IMPORT_CERTIFICATES_RESOURCE_TYPE,
+      serviceToken,
+      properties: {
+        ServerCertificateArn: this.serverCertificateArn,
+        ClientCertificateArn: this.clientCertificateArn,
+      },
+    });
+  }
+}
+
 const app = new App();
-new IntegTest(app, 'client-vpn-endpoint-integ', {
+new IntegTest(app, 'client-vpn-endpoint-ip-address-type-integ', {
   testCases: [
-    new TestStack(app, 'client-vpn-endpoint-stack', {
-      hostedZoneId,
-      hostedZoneName,
-    }),
+    new TestStack(app, 'client-vpn-endpoint-ip-address-type-stack'),
   ],
 });

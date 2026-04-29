@@ -1,12 +1,12 @@
 {
   "version": "53.0.0",
   "testCases": {
-    "client-vpn-endpoint-integ/DefaultTest": {
+    "client-vpn-endpoint-ip-address-type-integ/DefaultTest": {
       "stacks": [
-        "client-vpn-endpoint-stack"
+        "client-vpn-endpoint-ip-address-type-stack"
       ],
-      "assertionStack": "client-vpn-endpoint-integ/DefaultTest/DeployAssert",
-      "assertionStackName": "clientvpnendpointintegDefaultTestDeployAssert7B9D072C"
+      "assertionStack": "client-vpn-endpoint-ip-address-type-integ/DefaultTest/DeployAssert",
+      "assertionStackName": "clientvpnendpointipaddresstypeintegDefaultTestDeployAssert169BAC3E"
     }
   },
   "minimumCliVersion": "2.1119.0"
